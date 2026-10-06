@@ -15,6 +15,10 @@ one fat JAR, one systemd service. No anonymous shortening (an open shortener is 
 domain blocklisted). TLS termination is left to a reverse proxy (e.g. Zoraxy, Caddy). KShort itself listens on
 plain HTTP, by default only on `127.0.0.1`.
 
+> **Disclaimer:** KShort is vibe coded, written largely with an AI assistant, and is a proof of concept rather than
+> a hardened product. It has tests and a review behind it, but no independent security audit. Use it at your own
+> risk, and read the code before you put it in front of the internet.
+
 ## Quick start
 
 Requirements: JDK 25 to build (Amazon Corretto is the pinned toolchain, Gradle downloads it if missing), a Java 25
