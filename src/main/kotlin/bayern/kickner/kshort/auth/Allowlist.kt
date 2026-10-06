@@ -2,8 +2,11 @@ package bayern.kickner.kshort.auth
 
 /**
  * Decides who may create links. An entry matches the user's `sub`, `preferred_username` or verified e-mail
- * (case-insensitive). The single entry `"*"` allows every user of the IdP, which only makes sense when the IdP
+ * (the e-mail case-insensitive, the others exactly). The single entry `"*"` allows every user of the IdP, which only makes sense when the IdP
  * itself already restricts access to this client.
+ *
+ * Only `sub` is guaranteed to be stable. `preferred_username` and e-mail are safe entries only if users cannot
+ * change them at the IdP, otherwise anyone could rename themselves to an allowed name.
  *
  * @param entries The `allowedUsers` from the config.
  */

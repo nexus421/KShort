@@ -58,7 +58,7 @@ default. Error messages never contain secret values. In every case KShort exits 
 | `listenPort`   | Int            | `8080`             | Port to listen on.                                                                                |
 | `publicUrl`    | String         | required           | Public base URL without path, e.g. `https://s.example.de`. Short links and the OIDC callback are built from it. |
 | `databasePath` | String         | `"data/kshort.db"` | SQLite file. Parent directories are created.                                                      |
-| `allowedUsers` | List\<String\> | required           | Who may create links: `sub`, `preferred_username` or verified e-mail. `["*"]` allows every user of the IdP. |
+| `allowedUsers` | List\<String\> | required           | Who may create links: `sub`, `preferred_username` or verified e-mail. `["*"]` allows every user of the IdP. Only `sub` is guaranteed to be stable, so use `preferred_username` or e-mail only if users cannot change them at the IdP. |
 | `oidc`         | Object         | required           | See below.                                                                                        |
 | `session`      | Object         | required           | See below.                                                                                        |
 
@@ -131,6 +131,7 @@ SLF4J output is routed into Klogger as well, at level WARN and above. Every time
 2. **Server.**
    ```bash
    mkdir -p /root/kshort && cp build/libs/kshort.jar /root/kshort/
+   chmod 711 /root   # the throwaway service user (DynamicUser) must be able to reach the jar
    # /root/kshort/config.json must exist with databasePath "/var/lib/kshort/kshort.db", chmod 600 it
    cp kshort.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now kshort
    journalctl -u kshort -f

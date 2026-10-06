@@ -69,7 +69,9 @@ fun Route.authRoutes(oidc: OidcClient, allowlist: Allowlist, guard: SessionGuard
 
         val idpError = query["error"]
         if (idpError != null) {
-            staticLog(KLogger.Level.WARN, TAG) { "IdP reported '$idpError': ${query["error_description"].orEmpty().take(200)}" }
+            staticLog(KLogger.Level.WARN, TAG) {
+                "IdP reported '${logSafe(idpError, 100)}': ${logSafe(query["error_description"].orEmpty(), 200)}"
+            }
             return@get call.respondHtml(HttpStatusCode.Unauthorized) { loginPage("Anmeldung abgebrochen oder abgelehnt.") }
         }
 
@@ -119,3 +121,10 @@ fun Route.authRoutes(oidc: OidcClient, allowlist: Allowlist, guard: SessionGuard
 
 private fun HTML.loginExpiredPage() =
     messagePage("Anmeldung abgelaufen", "Der Anmeldevorgang ist ungültig oder abgelaufen.", "Erneut anmelden", "/_/login")
+
+/**
+ * [value] cut to [maxLength] with every control character replaced by `?`. For anything a visitor controls, such
+ * as query parameters, so a line break cannot forge an extra line in the log.
+ */
+internal fun logSafe(value: String, maxLength: Int): String =
+    value.take(maxLength).map { if (it.isISOControl()) '?' else it }.joinToString("")

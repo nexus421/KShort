@@ -16,6 +16,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.plugins.cookies.HttpCookies
 import io.ktor.client.request.forms.submitForm
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
@@ -264,6 +265,26 @@ class AppTest {
         assertEquals(HttpStatusCode.NotFound, bob.postForm("/_/links/$code/extend", bobCsrf, "ttl" to "FOREVER").status)
         assertEquals(HttpStatusCode.Found, bob.get("/$code").status)
         assertFalse(bob.get("/").bodyAsText().contains("http://localhost/$code"))
+    }
+
+    @Test
+    fun `a session cookie with a modified IV is rejected`() = testApplication {
+        val idp = FakeIdp(TestClock())
+        val client = kshortApp(idp)
+        val setCookie = client.login(idp).headers.getAll(HttpHeaders.SetCookie).orEmpty()
+            .firstOrNull { it.startsWith("kshort_session=") } ?: fail("no session cookie")
+        val cookie = setCookie.substringAfter("kshort_session=").substringBefore(';')
+
+        // AES-CBC: flipping bits of the IV flips the same bits of the first plaintext block, {"sub":"sub-alic.
+        // Byte 15 turns "sub-alice" into "sub-alixe", a different owner, if the IV is not authenticated.
+        val flipped = cookie.substring(30, 32).toInt(16) xor ('c'.code xor 'x'.code)
+        val tampered = cookie.substring(0, 30) + "%02x".format(flipped) + cookie.substring(32)
+        val plain = createClient { followRedirects = false }
+        suspend fun dashboardWith(value: String) =
+            plain.get("/") { header(HttpHeaders.Cookie, "kshort_session=$value") }.bodyAsText()
+
+        assertContains(dashboardWith(cookie), "Abmelden")
+        assertContains(dashboardWith(tampered), "/_/login")
     }
 
     @Test

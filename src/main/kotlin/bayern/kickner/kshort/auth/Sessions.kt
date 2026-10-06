@@ -4,6 +4,7 @@ import bayern.kickner.kshort.config.AppConfig
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.sessions.SessionTransportTransformerEncrypt
+import io.ktor.server.sessions.SessionTransportTransformerMessageAuthentication
 import io.ktor.server.sessions.Sessions
 import io.ktor.server.sessions.cookie
 import kotlinx.serialization.Serializable
@@ -60,6 +61,9 @@ fun Application.installSessions(config: AppConfig) {
             cookie.maxAgeInSeconds = SESSION_MILLIS / 1000
             cookie.extensions["SameSite"] = "Lax"
             transform(SessionTransportTransformerEncrypt(config.session.encryptKey, config.session.signKey))
+            // Ktor's encrypt transformer MACs only the ciphertext, not the IV, so the first AES-CBC block could be
+            // altered unnoticed. This outer HMAC covers the whole value including the IV (checked first on read)
+            transform(SessionTransportTransformerMessageAuthentication(config.session.signKey))
         }
         cookie<LoginState>("kshort_login") {
             cookie.path = "/_/"
@@ -69,6 +73,7 @@ fun Application.installSessions(config: AppConfig) {
             // Lax is required: the IdP sends the browser back with a top-level GET from another site
             cookie.extensions["SameSite"] = "Lax"
             transform(SessionTransportTransformerEncrypt(config.session.encryptKey, config.session.signKey))
+            transform(SessionTransportTransformerMessageAuthentication(config.session.signKey))
         }
     }
 }
