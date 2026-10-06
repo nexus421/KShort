@@ -7,6 +7,7 @@ import bayern.kickner.kshort.TempDatabase
 import bayern.kickner.kshort.TestClock
 import bayern.kickner.kshort.auth.OidcClient
 import bayern.kickner.kshort.auth.OidcLogic
+import bayern.kickner.kshort.auth.Pkce
 import bayern.kickner.kshort.auth.base64Url
 import bayern.kickner.kshort.kshort
 import bayern.kickner.kshort.link.LinkService
@@ -42,41 +43,58 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
-/** Fake OIDC provider state: answers with an ID token for [username] and the nonce of the current login. */
+/**
+ * Fake OIDC provider state: answers with an ID token for [username] and the nonce of the current login. The other
+ * switches simulate a broken or differently configured IdP.
+ */
 private class FakeIdp(val clock: TestClock) {
     @Volatile var nonce: String = ""
     @Volatile var username: String = "alice"
+    @Volatile var discoveryAvailable: Boolean = true
+    @Volatile var authMethods: List<String>? = null
+    @Volatile var tokenStatus: HttpStatusCode = HttpStatusCode.OK
+    @Volatile var tokenNonce: String? = null
     @Volatile var lastTokenRequest: Parameters? = null
     @Volatile var lastAuthHeader: String? = null
 }
 
 /**
- * Hosts the whole app with an in-memory database and a fake IdP at [TEST_ISSUER], and returns a client that
+ * Hosts the whole app with a temporary database and a fake IdP at [TEST_ISSUER], and returns a client that
  * behaves like a browser (keeps cookies, does not follow redirects).
  */
-private fun ApplicationTestBuilder.kshortApp(idp: FakeIdp, allowedUsers: List<String> = listOf("alice")): HttpClient {
+private fun ApplicationTestBuilder.kshortApp(
+    idp: FakeIdp,
+    allowedUsers: List<String> = listOf("alice"),
+    publicUrl: String = "http://localhost",
+): HttpClient {
     externalServices {
         hosts(TEST_ISSUER) {
             routing {
                 get("/.well-known/openid-configuration") {
+                    if (idp.discoveryAvailable.not()) return@get call.respondText("down", status = HttpStatusCode.ServiceUnavailable)
+                    val methods = idp.authMethods?.joinToString(",", ""","token_endpoint_auth_methods_supported":[""", "]") { "\"$it\"" }
                     call.respondText(
-                        """{"issuer":"$TEST_ISSUER","authorization_endpoint":"$TEST_ISSUER/authorize","token_endpoint":"$TEST_ISSUER/token"}""",
+                        """{"issuer":"$TEST_ISSUER","authorization_endpoint":"$TEST_ISSUER/authorize","token_endpoint":"$TEST_ISSUER/token"""" +
+                            methods.orEmpty() + "}",
                         ContentType.Application.Json,
                     )
                 }
                 post("/token") {
                     idp.lastTokenRequest = call.receiveParameters()
                     idp.lastAuthHeader = call.request.headers[HttpHeaders.Authorization]
+                    if (idp.tokenStatus != HttpStatusCode.OK) {
+                        return@post call.respondText("""{"error":"invalid_grant"}""", ContentType.Application.Json, idp.tokenStatus)
+                    }
                     val nowSeconds = idp.clock() / 1000
                     val payload = """{"iss":"$TEST_ISSUER","aud":"$TEST_CLIENT_ID","sub":"sub-${idp.username}",""" +
-                        """"preferred_username":"${idp.username}","exp":${nowSeconds + 300},"iat":$nowSeconds,"nonce":"${idp.nonce}"}"""
+                        """"preferred_username":"${idp.username}","exp":${nowSeconds + 300},"iat":$nowSeconds,"nonce":"${idp.tokenNonce ?: idp.nonce}"}"""
                     val idToken = "eyJhbGciOiJSUzI1NiJ9." + base64Url(payload.toByteArray()) + ".c2ln"
                     call.respondText("""{"access_token":"at","token_type":"Bearer","id_token":"$idToken"}""", ContentType.Application.Json)
                 }
             }
         }
     }
-    val config = testConfig(allowedUsers = allowedUsers)
+    val config = testConfig(allowedUsers = allowedUsers, publicUrl = publicUrl)
     val database = TempDatabase()
     val links = LinkService(database.repository, config.publicHost, idp.clock)
     val oidc = OidcClient(config.oidc, "${config.baseUrl}/_/callback", createClient { })
@@ -297,4 +315,129 @@ class AppTest {
 
         assertEquals(HttpStatusCode.PayloadTooLarge, response.status)
     }
+
+    @Test
+    fun `every page carries the complete security headers`() = testApplication {
+        val client = kshortApp(FakeIdp(TestClock()))
+
+        for (path in listOf("/", "/nope123")) {
+            val response = client.get(path)
+            val csp = response.headers["Content-Security-Policy"] ?: fail("no CSP on $path")
+            for (directive in listOf("default-src 'none'", "script-src 'self'", "style-src 'self'", "frame-ancestors 'none'")) {
+                assertContains(csp, directive)
+            }
+            assertEquals("DENY", response.headers["X-Frame-Options"])
+            assertEquals("nosniff", response.headers["X-Content-Type-Options"])
+            assertEquals("no-referrer", response.headers["Referrer-Policy"])
+        }
+    }
+
+    @Test
+    fun `cookies are secure, http only and same site lax with an https public url`() = testApplication {
+        val idp = FakeIdp(TestClock())
+        kshortApp(idp, publicUrl = "https://s.example.de")
+        // The cookie storage of a client would not send Secure cookies over the plain HTTP of the test engine
+        val plain = createClient { followRedirects = false }
+
+        val start = plain.get("/_/login")
+        val loginCookie = start.rawSetCookie("kshort_login")
+        val authorizationUrl = Url(start.headers[HttpHeaders.Location] ?: fail("no redirect to the IdP"))
+        idp.nonce = authorizationUrl.parameters["nonce"] ?: fail("no nonce")
+        val callback = plain.get("/_/callback?code=c0de&state=${authorizationUrl.parameters["state"]}") {
+            header(HttpHeaders.Cookie, loginCookie.substringBefore(';'))
+        }
+
+        assertEquals(HttpStatusCode.Found, callback.status)
+        for (cookie in listOf(loginCookie, callback.rawSetCookie("kshort_session"))) {
+            assertContains(cookie, "; Secure", ignoreCase = true)
+            assertContains(cookie, "; HttpOnly", ignoreCase = true)
+            assertContains(cookie, "SameSite=Lax")
+        }
+    }
+
+    @Test
+    fun `a login that took longer than ten minutes is rejected before any token request`() = testApplication {
+        val idp = FakeIdp(TestClock())
+        val client = kshortApp(idp)
+        val authorizationUrl = Url(client.get("/_/login").headers[HttpHeaders.Location] ?: fail("no redirect to the IdP"))
+
+        idp.clock.now += 11 * 60 * 1000
+
+        assertEquals(HttpStatusCode.BadRequest, client.get("/_/callback?code=c0de&state=${authorizationUrl.parameters["state"]}").status)
+        assertNull(idp.lastTokenRequest)
+    }
+
+    @Test
+    fun `an error reported by the IdP ends the login without a session`() = testApplication {
+        val idp = FakeIdp(TestClock())
+        val client = kshortApp(idp)
+        client.get("/_/login")
+
+        val response = client.get("/_/callback?error=access_denied&error_description=denied")
+
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+        assertNull(idp.lastTokenRequest)
+        assertContains(client.get("/").bodyAsText(), "/_/login")
+    }
+
+    @Test
+    fun `a failed token request creates no session`() = testApplication {
+        val idp = FakeIdp(TestClock()).apply { tokenStatus = HttpStatusCode.BadRequest }
+        val client = kshortApp(idp)
+
+        assertEquals(HttpStatusCode.BadGateway, client.login(idp).status)
+        assertContains(client.get("/").bodyAsText(), "/_/login")
+    }
+
+    @Test
+    fun `an id token with the nonce of another login creates no session`() = testApplication {
+        val idp = FakeIdp(TestClock()).apply { tokenNonce = "nonce-of-another-login" }
+        val client = kshortApp(idp)
+
+        assertEquals(HttpStatusCode.BadGateway, client.login(idp).status)
+        assertContains(client.get("/").bodyAsText(), "/_/login")
+    }
+
+    @Test
+    fun `login answers 502 while discovery fails and works once the IdP is back`() = testApplication {
+        val idp = FakeIdp(TestClock()).apply { discoveryAvailable = false }
+        val client = kshortApp(idp)
+
+        val response = client.get("/_/login")
+        assertEquals(HttpStatusCode.BadGateway, response.status)
+        assertNull(response.headers[HttpHeaders.Location])
+
+        idp.discoveryAvailable = true
+        assertEquals(HttpStatusCode.Found, client.login(idp).status)
+    }
+
+    @Test
+    fun `client_secret_post sends the credentials in the form instead of the header`() = testApplication {
+        val idp = FakeIdp(TestClock()).apply { authMethods = listOf("client_secret_post") }
+        val client = kshortApp(idp)
+
+        assertEquals(HttpStatusCode.Found, client.login(idp).status)
+
+        val form = idp.lastTokenRequest ?: fail("no token request")
+        assertEquals(TEST_CLIENT_ID, form["client_id"])
+        assertEquals(TEST_CLIENT_SECRET, form["client_secret"])
+        assertNull(idp.lastAuthHeader)
+    }
+
+    @Test
+    fun `the token request carries the verifier of the pkce challenge`() = testApplication {
+        val idp = FakeIdp(TestClock())
+        val client = kshortApp(idp)
+        val authorizationUrl = Url(client.get("/_/login").headers[HttpHeaders.Location] ?: fail("no redirect to the IdP"))
+        idp.nonce = authorizationUrl.parameters["nonce"] ?: fail("no nonce")
+
+        client.get("/_/callback?code=c0de&state=${authorizationUrl.parameters["state"]}")
+
+        val verifier = idp.lastTokenRequest?.get("code_verifier") ?: fail("no code_verifier")
+        assertEquals(authorizationUrl.parameters["code_challenge"], Pkce.challenge(verifier))
+    }
 }
+
+/** The raw `Set-Cookie` header of the cookie [name], with value and attributes. */
+private fun HttpResponse.rawSetCookie(name: String): String =
+    headers.getAll(HttpHeaders.SetCookie).orEmpty().firstOrNull { it.startsWith("$name=") } ?: fail("no cookie $name")
