@@ -1,0 +1,17 @@
+{
+  "listenHost": "127.0.0.1",
+  "listenPort": 8080,
+  "publicUrl": "https://s.example.de",
+  "databasePath": "/var/lib/kshort/kshort.db",
+  "allowedUsers": ["max", "anna@example.de"],
+  "oidc": {
+    "issuer": "https://auth.example.de/application/o/kshort/",
+    "clientId": "CLIENT_ID_FROM_THE_IDP",
+    "clientSecret": "CLIENT_SECRET_FROM_THE_IDP",
+    "scopes": "openid profile email"
+  },
+  "session": {
+    "encryptKeyHex": "OUTPUT_OF_java_-jar_kshort.jar_keys",
+    "signKeyHex": "OUTPUT_OF_java_-jar_kshort.jar_keys"
+  }
+}
